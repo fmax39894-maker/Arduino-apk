@@ -1,0 +1,52 @@
+<!doctype html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Voice Arduino APK Builder</title>
+<style>
+body{font-family:system-ui,sans-serif;max-width:700px;margin:auto;padding:24px;background:#f5f7fb}
+.card{background:white;border-radius:18px;padding:22px;box-shadow:0 5px 25px #0001}
+input,button{width:100%;box-sizing:border-box;padding:14px;margin:8px 0;border-radius:10px;font-size:16px}
+button{border:0;background:#1565c0;color:white;font-weight:700}
+small{color:#555}.log{white-space:pre-wrap;margin-top:15px}
+</style>
+</head>
+<body>
+<div class="card">
+<h1>🎤 Voice Arduino APK Builder</h1>
+<p>Build the Android app that sends ON/OFF to Arduino UNO through USB OTG.</p>
+<label>App name</label>
+<input id="name" value="Voice Arduino">
+<label>Package name</label>
+<input id="pkg" value="com.example.voicearduino">
+<button onclick="build()">📦 Build APK</button>
+<div id="log" class="log"></div>
+</div>
+<script>
+async function build(){
+  const log=document.getElementById('log');
+  log.textContent="⏳ Building APK... This can take a few minutes.";
+  try{
+    const r=await fetch('/build',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        appName:document.getElementById('name').value,
+        packageName:document.getElementById('pkg').value
+      })
+    });
+    if(!r.ok){
+      const x=await r.json().catch(()=>({error:"Unknown error"}));
+      throw new Error(x.error+(x.details?'\n'+x.details:''));
+    }
+    const blob=await r.blob();
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement('a');
+    a.href=url;a.download='VoiceArduino.apk';a.click();
+    URL.revokeObjectURL(url);
+    log.textContent="✅ APK ready. Your browser should have downloaded it.";
+  }catch(e){log.textContent="❌ "+e.message;}
+}
+</script>
+</body>
+</html>
