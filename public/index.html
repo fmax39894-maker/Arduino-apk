@@ -1,0 +1,87 @@
+<!doctype html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ZIP → APK Builder</title>
+<style>
+body{font-family:system-ui,sans-serif;background:#f4f6f9;margin:0;padding:20px}
+.card{max-width:650px;margin:20px auto;background:#fff;padding:24px;border-radius:18px;box-shadow:0 5px 25px #0001}
+h1{margin-top:0}
+input,button{width:100%;box-sizing:border-box;padding:14px;margin:8px 0;border-radius:10px;font-size:16px}
+button{border:0;background:#1565c0;color:#fff;font-weight:700}
+button:disabled{opacity:.5}
+#log{white-space:pre-wrap;background:#111;color:#eee;padding:14px;border-radius:10px;max-height:350px;overflow:auto;font-size:12px}
+a{display:block;text-align:center;margin-top:15px;padding:14px;background:#168a42;color:#fff;border-radius:10px;text-decoration:none;font-weight:700}
+</style>
+</head>
+<body>
+<div class="card">
+<h1>📦 ZIP → APK</h1>
+<p>Upload an Android Studio/Gradle project ZIP. The server builds a debug APK for you.</p>
+<input id="file" type="file" accept=".zip">
+<button id="build" onclick="build()">🚀 Build APK</button>
+<div id="state"></div>
+<pre id="log"></pre>
+<div id="download"></div>
+</div>
+
+<script>
+let timer;
+async function build(){
+  const f=document.getElementById("file").files[0];
+  const state=document.getElementById("state");
+  const log=document.getElementById("log");
+  const dl=document.getElementById("download");
+  if(!f){alert("Select a ZIP first.");return;}
+  if(!f.name.toLowerCase().endsWith(".zip")){alert("Please select a ZIP file.");return;}
+
+  document.getElementById("build").disabled=true;
+  state.textContent="⏳ Uploading...";
+  log.textContent="";
+  dl.innerHTML="";
+
+  const fd=new FormData();
+  fd.append("project",f);
+
+  try{
+    const r=await fetch("/build",{method:"POST",body:fd});
+    const j=await r.json();
+    if(!r.ok) throw new Error(j.error||"Upload failed");
+    poll(j.id);
+  }catch(e){
+    state.textContent="❌ "+e.message;
+    document.getElementById("build").disabled=false;
+  }
+}
+
+async function poll(id){
+  try{
+    const r=await fetch("/status/"+id);
+    const j=await r.json();
+    document.getElementById("state").textContent =
+      j.status==="done" ? "✅ Build complete" :
+      j.status==="error" ? "❌ Build failed" :
+      "⏳ Building...";
+
+    document.getElementById("log").textContent=j.log||"";
+    document.getElementById("log").scrollTop=document.getElementById("log").scrollHeight;
+
+    if(j.status==="done"){
+      document.getElementById("download").innerHTML =
+        '<a href="/download/'+id+'">⬇️ Download APK</a>';
+      document.getElementById("build").disabled=false;
+      return;
+    }
+    if(j.status==="error"){
+      document.getElementById("build").disabled=false;
+      return;
+    }
+    setTimeout(()=>poll(id),2000);
+  }catch(e){
+    document.getElementById("state").textContent="❌ "+e.message;
+    document.getElementById("build").disabled=false;
+  }
+}
+</script>
+</body>
+</html>
