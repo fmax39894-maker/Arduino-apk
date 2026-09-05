@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+BASE="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+DIST="$HOME/.gradle/wrapper/dists/gradle-9.6-bin"
+ZIP="$BASE/.gradle-9.6-bin.zip"
+if [ ! -x "$HOME/.local/bin/gradle" ]; then
+  if ! command -v gradle >/dev/null 2>&1; then
+    mkdir -p "$HOME/.local/bin"
+    wget -q https://services.gradle.org/distributions/gradle-9.6-bin.zip -O "$ZIP"
+    mkdir -p "$BASE/.gradle-dist"
+    unzip -q -o "$ZIP" -d "$BASE/.gradle-dist"
+    "$BASE/.gradle-dist/gradle-9.6/bin/gradle" "$@"
+    exit $?
+  fi
+fi
+gradle "$@"
