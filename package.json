@@ -1,7 +1,10 @@
 {
-  "name": "voice-arduino-apk-builder",
+  "name": "simple-zip-apk-builder",
   "version": "1.0.0",
   "private": true,
-  "scripts": {"start":"node server.js"},
-  "dependencies": {"express":"^5.1.0"}
+  "scripts": { "start": "node server.js" },
+  "dependencies": {
+    "express": "^5.1.0",
+    "multer": "^2.0.2"
+  }
 }

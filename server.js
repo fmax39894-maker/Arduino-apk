@@ -1,53 +1,182 @@
 const express = require("express");
+const multer = require("multer");
 const fs = require("fs");
-const os = require("os");
 const path = require("path");
-const { execFile } = require("child_process");
+const os = require("os");
+const crypto = require("crypto");
+const { spawn } = require("child_process");
 
 const app = express();
-app.use(express.json({limit:"1mb"}));
+const upload = multer({
+  dest: path.join(os.tmpdir(), "apk-upload"),
+  limits: { fileSize: 100 * 1024 * 1024 }
+});
+
 app.use(express.static(path.join(__dirname, "public")));
 
-app.post("/build", (req, res) => {
-  const job = fs.mkdtempSync(path.join(os.tmpdir(), "voice-arduino-"));
-  const project = path.join(job, "project");
-  fs.cpSync(path.join(__dirname, "android-template"), project, {recursive:true});
+const jobs = new Map();
+const MAX_LOG = 12000;
 
-  const p = req.body || {};
-  const appName = String(p.appName || "Voice Arduino").replace(/[^\w .-]/g, "").trim().slice(0,40) || "Voice Arduino";
-  const packageName = String(p.packageName || "com.example.voicearduino")
-    .toLowerCase().replace(/[^a-z0-9_.]/g,"").replace(/^\.+|\.+$/g,"") || "com.example.voicearduino";
+function safeId() {
+  return crypto.randomBytes(10).toString("hex");
+}
 
-  const main = path.join(project, "app/src/main/java/com/example/voicearduino/MainActivity.java");
-  let java = fs.readFileSync(main, "utf8");
-  java = java.replaceAll("com.example.voicearduino", packageName);
-  fs.writeFileSync(main, java);
+function log(job, text) {
+  job.log = (job.log + text).slice(-MAX_LOG);
+}
 
-  const manifest = path.join(project, "app/src/main/AndroidManifest.xml");
-  let mf = fs.readFileSync(manifest, "utf8").replaceAll("com.example.voicearduino", packageName).replaceAll("Voice Arduino", appName);
-  fs.writeFileSync(manifest, mf);
+function findGradleProject(dir) {
+  const direct = [
+    path.join(dir, "gradlew"),
+    path.join(dir, "gradlew.bat")
+  ];
+  if (fs.existsSync(direct[0])) return dir;
 
-  const gradle = path.join(project, "app/build.gradle");
-  let gr = fs.readFileSync(gradle, "utf8").replaceAll("com.example.voicearduino", packageName);
-  fs.writeFileSync(gradle, gr);
+  const entries = fs.readdirSync(dir, {withFileTypes:true})
+    .filter(x => x.isDirectory() && x.name !== "__MACOSX" && !x.name.startsWith("."));
 
-  const settings = path.join(project, "settings.gradle");
-  let st = fs.readFileSync(settings, "utf8").replace("Voice Arduino", appName);
-  fs.writeFileSync(settings, st);
-
-  const gradlew = path.join(project, "gradlew");
-  execFile(gradlew, ["assembleDebug"], {cwd:project, timeout: 300000}, (err, stdout, stderr) => {
-    if (err) {
-      console.error(stdout, stderr);
-      return res.status(500).json({error:"Build failed", details:(stderr||stdout).slice(-6000)});
+  for (const e of entries) {
+    const candidate = path.join(dir, e.name);
+    if (fs.existsSync(path.join(candidate, "settings.gradle")) ||
+        fs.existsSync(path.join(candidate, "settings.gradle.kts")) ||
+        fs.existsSync(path.join(candidate, "gradlew"))) {
+      return candidate;
     }
-    const apk = path.join(project, "app/build/outputs/apk/debug/app-debug.apk");
-    if (!fs.existsSync(apk)) return res.status(500).json({error:"APK was not produced"});
-    res.download(apk, "VoiceArduino.apk", () => {
-      fs.rmSync(job, {recursive:true, force:true});
+  }
+  return null;
+}
+
+function extractZip(zip, out) {
+  // Use unzip only after checking every member path for traversal.
+  const listing = require("child_process").execFileSync(
+    "unzip", ["-Z1", zip], {encoding:"utf8"}
+  ).split(/\r?\n/).filter(Boolean);
+
+  for (const name of listing) {
+    const normalized = path.posix.normalize(name.replaceAll("\\","/"));
+    if (normalized.startsWith("../") || normalized === ".." ||
+        normalized.startsWith("/") || /^[A-Za-z]:/.test(normalized)) {
+      throw new Error("Unsafe ZIP path: " + name);
+    }
+  }
+
+  require("child_process").execFileSync(
+    "unzip", ["-q", zip, "-d", out], {stdio:"pipe"}
+  );
+}
+
+function startBuild(job, zipPath) {
+  job.status = "building";
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), "apk-job-"));
+  job.work = work;
+
+  try {
+    const src = path.join(work, "src");
+    fs.mkdirSync(src);
+    extractZip(zipPath, src);
+
+    const project = findGradleProject(src);
+    if (!project) throw new Error(
+      "No Android Gradle project found. ZIP must contain settings.gradle(.kts), build.gradle(.kts), and an app module."
+    );
+
+    job.project = project;
+    log(job, "Project found: " + path.relative(src, project) + "\n");
+
+    const gradlew = path.join(project, "gradlew");
+    let command, args;
+
+    if (fs.existsSync(gradlew)) {
+      fs.chmodSync(gradlew, 0o755);
+      command = gradlew;
+      args = ["assembleDebug", "--no-daemon", "--stacktrace"];
+    } else {
+      command = "gradle";
+      args = ["assembleDebug", "--no-daemon", "--stacktrace"];
+    }
+
+    log(job, "Running " + command + " " + args.join(" ") + "\n\n");
+
+    const child = spawn(command, args, {
+      cwd: project,
+      env: {...process.env, CI:"true"},
+      shell: false
     });
+
+    child.stdout.on("data", d => log(job, d.toString()));
+    child.stderr.on("data", d => log(job, d.toString()));
+
+    child.on("error", e => finish(false, e));
+    child.on("close", code => {
+      if (code !== 0) return finish(false, new Error("Gradle exited with code " + code));
+
+      const candidates = [];
+      function walk(d) {
+        for (const e of fs.readdirSync(d, {withFileTypes:true})) {
+          const p = path.join(d, e.name);
+          if (e.isDirectory()) walk(p);
+          else if (e.name.endsWith(".apk")) candidates.push(p);
+        }
+      }
+      walk(project);
+
+      if (!candidates.length)
+        return finish(false, new Error("Build completed but no APK was found."));
+
+      job.apk = candidates.find(x => x.includes(path.join("outputs","apk","debug"))) || candidates[0];
+      job.status = "done";
+      job.log += "\n\n✅ APK BUILD SUCCESSFUL\n";
+      cleanupZip();
+    });
+
+    function finish(ok, err) {
+      if (job.status === "done") return;
+      job.status = "error";
+      job.error = err.message;
+      log(job, "\n\n❌ " + err.message + "\n");
+      cleanupZip();
+    }
+
+    function cleanupZip() {
+      try { fs.rmSync(zipPath, {force:true}); } catch {}
+    }
+  } catch (e) {
+    job.status = "error";
+    job.error = e.message;
+    log(job, "\n\n❌ " + e.message + "\n");
+    try { fs.rmSync(zipPath, {force:true}); } catch {}
+  }
+}
+
+app.post("/build", upload.single("project"), (req, res) => {
+  if (!req.file) return res.status(400).json({error:"Choose a ZIP file first."});
+
+  const id = safeId();
+  const job = {id, status:"queued", log:"", error:null, apk:null};
+  jobs.set(id, job);
+
+  startBuild(job, req.file.path);
+  res.json({id});
+});
+
+app.get("/status/:id", (req,res) => {
+  const job = jobs.get(req.params.id);
+  if (!job) return res.status(404).json({error:"Build job not found."});
+  res.json({
+    status: job.status,
+    log: job.log,
+    error: job.error
   });
 });
 
-const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`Builder listening on ${port}`));
+app.get("/download/:id", (req,res) => {
+  const job = jobs.get(req.params.id);
+  if (!job || job.status !== "done" || !job.apk || !fs.existsSync(job.apk))
+    return res.status(404).send("APK not ready.");
+  res.download(job.apk, "VoiceArduino.apk");
+});
+
+app.get("/health", (req,res) => res.json({ok:true}));
+
+const port = process.env.PORT || 10000;
+app.listen(port, () => console.log("ZIP APK Builder listening on " + port));

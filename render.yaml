@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: voice-arduino-apk-builder
+    name: simple-apk-builder
     runtime: docker
     plan: free
     healthCheckPath: /
